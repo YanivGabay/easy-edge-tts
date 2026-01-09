@@ -17,6 +17,22 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class SentenceTiming:
+    """Timing information for a sentence boundary from TTS."""
+    text: str
+    start: float  # Start time in seconds
+    end: float    # End time in seconds
+
+    @property
+    def duration(self) -> float:
+        """Duration of the sentence in seconds."""
+        return self.end - self.start
+
+    def __repr__(self) -> str:
+        return f"SentenceTiming({self.text[:30]!r}..., {self.start:.2f}s-{self.end:.2f}s)"
+
+
+@dataclass
 class TTSResult:
     """Result from TTS generation."""
     audio_path: Path
@@ -26,6 +42,33 @@ class TTSResult:
 
     def __repr__(self) -> str:
         return f"TTSResult({self.audio_path.name}, {self.duration:.1f}s, {self.voice})"
+
+
+@dataclass
+class TTSResultWithSentences:
+    """Result from TTS generation with sentence-level timing."""
+    audio_path: Path
+    duration: float
+    voice: str
+    backend: str
+    sentences: list[SentenceTiming]
+
+    def __repr__(self) -> str:
+        return f"TTSResultWithSentences({self.audio_path.name}, {self.duration:.1f}s, {len(self.sentences)} sentences)"
+
+    def get_sentence_at_time(self, time: float) -> SentenceTiming | None:
+        """Get the sentence being spoken at a given time."""
+        for sentence in self.sentences:
+            if sentence.start <= time < sentence.end:
+                return sentence
+        return None
+
+    def to_subtitle_segments(self) -> list[dict]:
+        """Convert sentence timings to subtitle segment format."""
+        return [
+            {"start": s.start, "end": s.end, "text": s.text}
+            for s in self.sentences
+        ]
 
 
 class EdgeTTS:
@@ -164,6 +207,76 @@ class EdgeTTS:
         )
 
         return result, timestamps
+
+    async def generate_with_sentences(
+        self,
+        text: str,
+        output_path: Path | str,
+        rate: str = "+0%",
+        pitch: str = "+0Hz",
+    ) -> TTSResultWithSentences:
+        """
+        Generate speech with sentence-level timing information.
+
+        This is ideal for synchronizing on-screen text with narration,
+        as sentences provide natural reading boundaries.
+
+        Args:
+            text: Text to convert
+            output_path: Where to save audio
+            rate: Speed adjustment
+            pitch: Pitch adjustment
+
+        Returns:
+            TTSResultWithSentences containing audio path, duration, and
+            a list of SentenceTiming objects with start/end times for each sentence.
+
+        Example:
+            >>> tts = EdgeTTS(voice="aria")
+            >>> result = await tts.generate_with_sentences(
+            ...     "Hello world. This is a test.",
+            ...     "output.mp3"
+            ... )
+            >>> for sentence in result.sentences:
+            ...     print(f"{sentence.start:.2f}s: {sentence.text}")
+            0.00s: Hello world.
+            0.95s: This is a test.
+        """
+        try:
+            import edge_tts
+        except ImportError:
+            raise ImportError("edge-tts not installed. Run: pip install edge-tts")
+
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        communicate = edge_tts.Communicate(text, self.voice, rate=rate, pitch=pitch)
+
+        sentences: list[SentenceTiming] = []
+        with open(output_path, "wb") as f:
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    f.write(chunk["data"])
+                elif chunk["type"] == "SentenceBoundary":
+                    start = chunk["offset"] / 10_000_000  # Convert to seconds
+                    end = (chunk["offset"] + chunk["duration"]) / 10_000_000
+                    sentences.append(SentenceTiming(
+                        text=chunk["text"],
+                        start=start,
+                        end=end,
+                    ))
+
+        duration = get_audio_duration(output_path)
+        if duration <= 0:
+            duration = estimate_duration(text)
+
+        return TTSResultWithSentences(
+            audio_path=output_path,
+            duration=duration,
+            voice=self.voice,
+            backend="edge-tts",
+            sentences=sentences,
+        )
 
     @classmethod
     def list_voices(cls) -> list[str]:

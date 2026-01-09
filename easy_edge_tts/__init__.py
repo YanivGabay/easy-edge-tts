@@ -15,16 +15,24 @@ Usage:
     await tts.generate("The tension was unbearable...", "output.mp3")
 """
 
-from .tts import EdgeTTS, ElevenLabsTTS, TTSResult
+from .tts import (
+    EdgeTTS,
+    ElevenLabsTTS,
+    TTSResult,
+    TTSResultWithSentences,
+    SentenceTiming,
+)
 from .rotator import VoiceRotator, get_voice_rotator
 from .voices import EDGE_VOICES, VOICE_MOODS
 from .utils import get_audio_duration
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __all__ = [
     "EdgeTTS",
     "ElevenLabsTTS",
     "TTSResult",
+    "TTSResultWithSentences",
+    "SentenceTiming",
     "VoiceRotator",
     "get_voice_rotator",
     "speak",

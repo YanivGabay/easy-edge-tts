@@ -1,12 +1,15 @@
 """Tests for easy-edge-tts."""
 
 import pytest
+from pathlib import Path
 from easy_edge_tts import (
     EdgeTTS,
     VoiceRotator,
     EDGE_VOICES,
     VOICE_MOODS,
     get_audio_duration,
+    SentenceTiming,
+    TTSResultWithSentences,
 )
 from easy_edge_tts.voices import get_voice_id, list_voices, get_voices_for_mood
 
@@ -155,3 +158,99 @@ class TestUtils:
         """Test duration detection with nonexistent file."""
         duration = get_audio_duration("/nonexistent/file.mp3")
         assert duration == 0.0
+
+
+class TestSentenceTiming:
+    """Test SentenceTiming dataclass."""
+
+    def test_creation(self):
+        """Test creating a SentenceTiming."""
+        timing = SentenceTiming(text="Hello world.", start=0.0, end=1.5)
+        assert timing.text == "Hello world."
+        assert timing.start == 0.0
+        assert timing.end == 1.5
+
+    def test_duration_property(self):
+        """Test duration calculation."""
+        timing = SentenceTiming(text="Test", start=1.0, end=3.5)
+        assert timing.duration == 2.5
+
+    def test_repr(self):
+        """Test string representation."""
+        timing = SentenceTiming(text="Hello world.", start=0.0, end=1.5)
+        assert "Hello world." in repr(timing)
+        assert "0.00s" in repr(timing)
+
+
+class TestTTSResultWithSentences:
+    """Test TTSResultWithSentences dataclass."""
+
+    def test_creation(self):
+        """Test creating a result with sentences."""
+        sentences = [
+            SentenceTiming("Hello.", 0.0, 1.0),
+            SentenceTiming("World.", 1.0, 2.0),
+        ]
+        result = TTSResultWithSentences(
+            audio_path=Path("/tmp/test.mp3"),
+            duration=2.0,
+            voice="en-US-GuyNeural",
+            backend="edge-tts",
+            sentences=sentences,
+        )
+        assert len(result.sentences) == 2
+        assert result.duration == 2.0
+
+    def test_get_sentence_at_time(self):
+        """Test finding sentence at specific time."""
+        sentences = [
+            SentenceTiming("Hello.", 0.0, 1.0),
+            SentenceTiming("World.", 1.0, 2.0),
+        ]
+        result = TTSResultWithSentences(
+            audio_path=Path("/tmp/test.mp3"),
+            duration=2.0,
+            voice="en-US-GuyNeural",
+            backend="edge-tts",
+            sentences=sentences,
+        )
+
+        sentence = result.get_sentence_at_time(0.5)
+        assert sentence.text == "Hello."
+
+        sentence = result.get_sentence_at_time(1.5)
+        assert sentence.text == "World."
+
+        sentence = result.get_sentence_at_time(3.0)
+        assert sentence is None
+
+    def test_to_subtitle_segments(self):
+        """Test converting to subtitle format."""
+        sentences = [
+            SentenceTiming("Hello.", 0.0, 1.0),
+            SentenceTiming("World.", 1.0, 2.0),
+        ]
+        result = TTSResultWithSentences(
+            audio_path=Path("/tmp/test.mp3"),
+            duration=2.0,
+            voice="en-US-GuyNeural",
+            backend="edge-tts",
+            sentences=sentences,
+        )
+
+        segments = result.to_subtitle_segments()
+        assert len(segments) == 2
+        assert segments[0] == {"start": 0.0, "end": 1.0, "text": "Hello."}
+        assert segments[1] == {"start": 1.0, "end": 2.0, "text": "World."}
+
+    def test_repr(self):
+        """Test string representation."""
+        sentences = [SentenceTiming("Hello.", 0.0, 1.0)]
+        result = TTSResultWithSentences(
+            audio_path=Path("/tmp/test.mp3"),
+            duration=1.0,
+            voice="en-US-GuyNeural",
+            backend="edge-tts",
+            sentences=sentences,
+        )
+        assert "1 sentences" in repr(result)
