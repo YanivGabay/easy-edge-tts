@@ -292,6 +292,8 @@ class EdgeTTS:
         output_path: Path | str,
         rate: str = "+0%",
         pitch: str = "+0Hz",
+        max_retries: int = 3,
+        retry_delay: float = 2.0,
     ) -> TTSResult:
         """
         Generate speech from text.
@@ -301,6 +303,8 @@ class EdgeTTS:
             output_path: Where to save the audio file
             rate: Speed adjustment ("-50%" to "+100%")
             pitch: Pitch adjustment (e.g., "+5Hz", "-10Hz")
+            max_retries: Maximum retry attempts on failure (default: 3)
+            retry_delay: Delay between retries in seconds (default: 2.0)
 
         Returns:
             TTSResult with path, duration, and metadata
@@ -308,8 +312,11 @@ class EdgeTTS:
         Raises:
             ImportError: If edge-tts is not installed
         """
+        import asyncio
+
         try:
             import edge_tts
+            from edge_tts.exceptions import NoAudioReceived
         except ImportError:
             raise ImportError(
                 "edge-tts not installed. Run: pip install edge-tts"
@@ -318,27 +325,60 @@ class EdgeTTS:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Generate audio
-        communicate = edge_tts.Communicate(
-            text,
-            self.voice,
-            rate=rate,
-            pitch=pitch,
-        )
+        # Log input for debugging
+        text_preview = text[:100] + "..." if len(text) > 100 else text
+        logger.info(f"[EdgeTTS] generate: voice={self.voice}, text_len={len(text)}")
 
-        await communicate.save(str(output_path))
+        if not text or not text.strip():
+            logger.error(f"[EdgeTTS] EMPTY TEXT provided!")
+            raise ValueError("Cannot generate TTS for empty text")
 
-        # Get actual duration
-        duration = get_audio_duration(output_path)
-        if duration <= 0:
-            duration = estimate_duration(text)
+        last_error = None
 
-        return TTSResult(
-            audio_path=output_path,
-            duration=duration,
-            voice=self.voice,
-            backend="edge-tts"
-        )
+        for attempt in range(max_retries):
+            try:
+                communicate = edge_tts.Communicate(
+                    text,
+                    self.voice,
+                    rate=rate,
+                    pitch=pitch,
+                )
+
+                await communicate.save(str(output_path))
+
+                # Get actual duration
+                duration = get_audio_duration(output_path)
+                if duration <= 0:
+                    duration = estimate_duration(text)
+
+                logger.info(f"[EdgeTTS] Generated {duration:.1f}s audio")
+
+                return TTSResult(
+                    audio_path=output_path,
+                    duration=duration,
+                    voice=self.voice,
+                    backend="edge-tts"
+                )
+
+            except NoAudioReceived as e:
+                last_error = e
+                logger.warning(f"[EdgeTTS] NoAudioReceived attempt {attempt + 1}/{max_retries}")
+                if attempt < max_retries - 1:
+                    wait_time = retry_delay * (attempt + 1)
+                    logger.info(f"[EdgeTTS] Retrying in {wait_time:.1f}s...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    logger.error(f"[EdgeTTS] All retries failed. Text: {text_preview!r}")
+
+            except Exception as e:
+                last_error = e
+                logger.error(f"[EdgeTTS] Error: {type(e).__name__}: {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay * (attempt + 1))
+                else:
+                    logger.error(f"[EdgeTTS] All retries failed")
+
+        raise last_error
 
     async def generate_with_timestamps(
         self,
@@ -346,6 +386,8 @@ class EdgeTTS:
         output_path: Path | str,
         rate: str = "+0%",
         pitch: str = "+0Hz",
+        max_retries: int = 3,
+        retry_delay: float = 2.0,
     ) -> tuple[TTSResult, list[dict]]:
         """
         Generate speech with word-level timestamps.
@@ -357,45 +399,81 @@ class EdgeTTS:
             output_path: Where to save audio
             rate: Speed adjustment
             pitch: Pitch adjustment
+            max_retries: Maximum retry attempts on failure (default: 3)
+            retry_delay: Delay between retries in seconds (default: 2.0)
 
         Returns:
             Tuple of (TTSResult, list of word timings)
             Each timing dict has: {"text": str, "start": float, "end": float}
         """
+        import asyncio
+
         try:
             import edge_tts
+            from edge_tts.exceptions import NoAudioReceived
         except ImportError:
             raise ImportError("edge-tts not installed. Run: pip install edge-tts")
 
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        communicate = edge_tts.Communicate(text, self.voice, rate=rate, pitch=pitch)
+        text_preview = text[:100] + "..." if len(text) > 100 else text
+        logger.info(f"[EdgeTTS] generate_with_timestamps: voice={self.voice}, text_len={len(text)}")
 
-        timestamps = []
-        with open(output_path, "wb") as f:
-            async for chunk in communicate.stream():
-                if chunk["type"] == "audio":
-                    f.write(chunk["data"])
-                elif chunk["type"] == "WordBoundary":
-                    timestamps.append({
-                        "text": chunk["text"],
-                        "start": chunk["offset"] / 10_000_000,  # Convert to seconds
-                        "end": (chunk["offset"] + chunk["duration"]) / 10_000_000,
-                    })
+        if not text or not text.strip():
+            logger.error(f"[EdgeTTS] EMPTY TEXT provided!")
+            raise ValueError("Cannot generate TTS for empty text")
 
-        duration = get_audio_duration(output_path)
-        if duration <= 0:
-            duration = estimate_duration(text)
+        last_error = None
 
-        result = TTSResult(
-            audio_path=output_path,
-            duration=duration,
-            voice=self.voice,
-            backend="edge-tts"
-        )
+        for attempt in range(max_retries):
+            try:
+                communicate = edge_tts.Communicate(text, self.voice, rate=rate, pitch=pitch)
 
-        return result, timestamps
+                timestamps = []
+                with open(output_path, "wb") as f:
+                    async for chunk in communicate.stream():
+                        if chunk["type"] == "audio":
+                            f.write(chunk["data"])
+                        elif chunk["type"] == "WordBoundary":
+                            timestamps.append({
+                                "text": chunk["text"],
+                                "start": chunk["offset"] / 10_000_000,  # Convert to seconds
+                                "end": (chunk["offset"] + chunk["duration"]) / 10_000_000,
+                            })
+
+                duration = get_audio_duration(output_path)
+                if duration <= 0:
+                    duration = estimate_duration(text)
+
+                logger.info(f"[EdgeTTS] Generated {duration:.1f}s with {len(timestamps)} word timestamps")
+
+                result = TTSResult(
+                    audio_path=output_path,
+                    duration=duration,
+                    voice=self.voice,
+                    backend="edge-tts"
+                )
+
+                return result, timestamps
+
+            except NoAudioReceived as e:
+                last_error = e
+                logger.warning(f"[EdgeTTS] NoAudioReceived attempt {attempt + 1}/{max_retries}")
+                if attempt < max_retries - 1:
+                    wait_time = retry_delay * (attempt + 1)
+                    logger.info(f"[EdgeTTS] Retrying in {wait_time:.1f}s...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    logger.error(f"[EdgeTTS] All retries failed. Text: {text_preview!r}")
+
+            except Exception as e:
+                last_error = e
+                logger.error(f"[EdgeTTS] Error: {type(e).__name__}: {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay * (attempt + 1))
+
+        raise last_error
 
     async def generate_with_sentences(
         self,
@@ -403,6 +481,8 @@ class EdgeTTS:
         output_path: Path | str,
         rate: str = "+0%",
         pitch: str = "+0Hz",
+        max_retries: int = 3,
+        retry_delay: float = 2.0,
     ) -> TTSResultWithSentences:
         """
         Generate speech with sentence-level timing information.
@@ -415,6 +495,8 @@ class EdgeTTS:
             output_path: Where to save audio
             rate: Speed adjustment
             pitch: Pitch adjustment
+            max_retries: Maximum retry attempts on failure (default: 3)
+            retry_delay: Delay between retries in seconds (default: 2.0)
 
         Returns:
             TTSResultWithSentences containing audio path, duration, and
@@ -431,41 +513,75 @@ class EdgeTTS:
             0.00s: Hello world.
             0.95s: This is a test.
         """
+        import asyncio
+
         try:
             import edge_tts
+            from edge_tts.exceptions import NoAudioReceived
         except ImportError:
             raise ImportError("edge-tts not installed. Run: pip install edge-tts")
 
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        communicate = edge_tts.Communicate(text, self.voice, rate=rate, pitch=pitch)
+        text_preview = text[:100] + "..." if len(text) > 100 else text
+        logger.info(f"[EdgeTTS] generate_with_sentences: voice={self.voice}, text_len={len(text)}")
 
-        sentences: list[SentenceTiming] = []
-        with open(output_path, "wb") as f:
-            async for chunk in communicate.stream():
-                if chunk["type"] == "audio":
-                    f.write(chunk["data"])
-                elif chunk["type"] == "SentenceBoundary":
-                    start = chunk["offset"] / 10_000_000  # Convert to seconds
-                    end = (chunk["offset"] + chunk["duration"]) / 10_000_000
-                    sentences.append(SentenceTiming(
-                        text=chunk["text"],
-                        start=start,
-                        end=end,
-                    ))
+        if not text or not text.strip():
+            logger.error(f"[EdgeTTS] EMPTY TEXT provided!")
+            raise ValueError("Cannot generate TTS for empty text")
 
-        duration = get_audio_duration(output_path)
-        if duration <= 0:
-            duration = estimate_duration(text)
+        last_error = None
 
-        return TTSResultWithSentences(
-            audio_path=output_path,
-            duration=duration,
-            voice=self.voice,
-            backend="edge-tts",
-            sentences=sentences,
-        )
+        for attempt in range(max_retries):
+            try:
+                communicate = edge_tts.Communicate(text, self.voice, rate=rate, pitch=pitch)
+
+                sentences: list[SentenceTiming] = []
+                with open(output_path, "wb") as f:
+                    async for chunk in communicate.stream():
+                        if chunk["type"] == "audio":
+                            f.write(chunk["data"])
+                        elif chunk["type"] == "SentenceBoundary":
+                            start = chunk["offset"] / 10_000_000  # Convert to seconds
+                            end = (chunk["offset"] + chunk["duration"]) / 10_000_000
+                            sentences.append(SentenceTiming(
+                                text=chunk["text"],
+                                start=start,
+                                end=end,
+                            ))
+
+                duration = get_audio_duration(output_path)
+                if duration <= 0:
+                    duration = estimate_duration(text)
+
+                logger.info(f"[EdgeTTS] Generated {duration:.1f}s with {len(sentences)} sentences")
+
+                return TTSResultWithSentences(
+                    audio_path=output_path,
+                    duration=duration,
+                    voice=self.voice,
+                    backend="edge-tts",
+                    sentences=sentences,
+                )
+
+            except NoAudioReceived as e:
+                last_error = e
+                logger.warning(f"[EdgeTTS] NoAudioReceived attempt {attempt + 1}/{max_retries}")
+                if attempt < max_retries - 1:
+                    wait_time = retry_delay * (attempt + 1)
+                    logger.info(f"[EdgeTTS] Retrying in {wait_time:.1f}s...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    logger.error(f"[EdgeTTS] All retries failed. Text: {text_preview!r}")
+
+            except Exception as e:
+                last_error = e
+                logger.error(f"[EdgeTTS] Error: {type(e).__name__}: {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay * (attempt + 1))
+
+        raise last_error
 
     async def generate_with_timings(
         self,
@@ -473,6 +589,8 @@ class EdgeTTS:
         output_path: Path | str,
         rate: str = "+0%",
         pitch: str = "+0Hz",
+        max_retries: int = 3,
+        retry_delay: float = 2.0,
     ) -> TTSResultWithTimings:
         """
         Generate speech with both sentence and word-level timing.
@@ -489,6 +607,8 @@ class EdgeTTS:
             output_path: Where to save audio
             rate: Speed adjustment
             pitch: Pitch adjustment
+            max_retries: Maximum retry attempts on failure (default: 3)
+            retry_delay: Delay between retries in seconds (default: 2.0)
 
         Returns:
             TTSResultWithTimings containing audio path, duration,
@@ -505,52 +625,110 @@ class EdgeTTS:
             >>> for seg in segments:
             ...     print(f"{seg['start']:.2f}s: {seg['text']}")
         """
+        import asyncio
+
         try:
             import edge_tts
+            from edge_tts.exceptions import NoAudioReceived
         except ImportError:
             raise ImportError("edge-tts not installed. Run: pip install edge-tts")
 
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        communicate = edge_tts.Communicate(text, self.voice, rate=rate, pitch=pitch)
+        # Log input for debugging
+        text_preview = text[:100] + "..." if len(text) > 100 else text
+        text_preview_clean = text_preview.replace('\n', ' ')
+        logger.info(f"[EdgeTTS] generate_with_timings called")
+        logger.info(f"[EdgeTTS] Voice: {self.voice}, Rate: {rate}, Pitch: {pitch}")
+        logger.info(f"[EdgeTTS] Text length: {len(text)} chars")
+        logger.info(f"[EdgeTTS] Text preview: {text_preview_clean!r}")
 
-        sentences: list[SentenceTiming] = []
-        words: list[WordTiming] = []
+        # Check for empty or whitespace-only text
+        if not text or not text.strip():
+            logger.error(f"[EdgeTTS] EMPTY TEXT provided! text={text!r}")
+            raise ValueError("Cannot generate TTS for empty text")
 
-        with open(output_path, "wb") as f:
-            async for chunk in communicate.stream():
-                if chunk["type"] == "audio":
-                    f.write(chunk["data"])
-                elif chunk["type"] == "SentenceBoundary":
-                    start = chunk["offset"] / 10_000_000
-                    end = (chunk["offset"] + chunk["duration"]) / 10_000_000
-                    sentences.append(SentenceTiming(
-                        text=chunk["text"],
-                        start=start,
-                        end=end,
-                    ))
-                elif chunk["type"] == "WordBoundary":
-                    start = chunk["offset"] / 10_000_000
-                    end = (chunk["offset"] + chunk["duration"]) / 10_000_000
-                    words.append(WordTiming(
-                        text=chunk["text"],
-                        start=start,
-                        end=end,
-                    ))
+        last_error = None
 
-        duration = get_audio_duration(output_path)
-        if duration <= 0:
-            duration = estimate_duration(text)
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"[EdgeTTS] Attempt {attempt + 1}/{max_retries}...")
 
-        return TTSResultWithTimings(
-            audio_path=output_path,
-            duration=duration,
-            voice=self.voice,
-            backend="edge-tts",
-            sentences=sentences,
-            words=words,
-        )
+                communicate = edge_tts.Communicate(text, self.voice, rate=rate, pitch=pitch)
+
+                sentences: list[SentenceTiming] = []
+                words: list[WordTiming] = []
+                audio_bytes_received = 0
+
+                with open(output_path, "wb") as f:
+                    async for chunk in communicate.stream():
+                        if chunk["type"] == "audio":
+                            f.write(chunk["data"])
+                            audio_bytes_received += len(chunk["data"])
+                        elif chunk["type"] == "SentenceBoundary":
+                            start = chunk["offset"] / 10_000_000
+                            end = (chunk["offset"] + chunk["duration"]) / 10_000_000
+                            sentences.append(SentenceTiming(
+                                text=chunk["text"],
+                                start=start,
+                                end=end,
+                            ))
+                        elif chunk["type"] == "WordBoundary":
+                            start = chunk["offset"] / 10_000_000
+                            end = (chunk["offset"] + chunk["duration"]) / 10_000_000
+                            words.append(WordTiming(
+                                text=chunk["text"],
+                                start=start,
+                                end=end,
+                            ))
+
+                logger.info(f"[EdgeTTS] Stream completed: {audio_bytes_received} bytes, {len(sentences)} sentences, {len(words)} words")
+
+                duration = get_audio_duration(output_path)
+                if duration <= 0:
+                    duration = estimate_duration(text)
+                    logger.warning(f"[EdgeTTS] Could not read duration from file, estimated: {duration:.1f}s")
+                else:
+                    logger.info(f"[EdgeTTS] Audio duration: {duration:.1f}s")
+
+                return TTSResultWithTimings(
+                    audio_path=output_path,
+                    duration=duration,
+                    voice=self.voice,
+                    backend="edge-tts",
+                    sentences=sentences,
+                    words=words,
+                )
+
+            except NoAudioReceived as e:
+                last_error = e
+                logger.warning(f"[EdgeTTS] NoAudioReceived on attempt {attempt + 1}/{max_retries}")
+                logger.warning(f"[EdgeTTS] Voice: {self.voice}")
+                logger.warning(f"[EdgeTTS] Text ({len(text)} chars): {text_preview_clean!r}")
+
+                if attempt < max_retries - 1:
+                    wait_time = retry_delay * (attempt + 1)  # Exponential backoff
+                    logger.info(f"[EdgeTTS] Retrying in {wait_time:.1f}s...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    logger.error(f"[EdgeTTS] All {max_retries} attempts failed with NoAudioReceived")
+                    logger.error(f"[EdgeTTS] FULL TEXT THAT FAILED:\n{text}")
+
+            except Exception as e:
+                last_error = e
+                logger.error(f"[EdgeTTS] Unexpected error on attempt {attempt + 1}: {type(e).__name__}: {e}")
+
+                if attempt < max_retries - 1:
+                    wait_time = retry_delay * (attempt + 1)
+                    logger.info(f"[EdgeTTS] Retrying in {wait_time:.1f}s...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    logger.error(f"[EdgeTTS] All {max_retries} attempts failed")
+                    logger.error(f"[EdgeTTS] FULL TEXT THAT FAILED:\n{text}")
+
+        # If we get here, all retries failed
+        raise last_error
 
     @classmethod
     def list_voices(cls) -> list[str]:
