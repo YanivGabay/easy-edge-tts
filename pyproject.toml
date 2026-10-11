@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "easy-edge-tts"
-version = "0.4.0"
+version = "0.5.0"
 description = "High-level TTS with voice rotation and mood selection for content creators"
 readme = "README.md"
 license = "MIT"

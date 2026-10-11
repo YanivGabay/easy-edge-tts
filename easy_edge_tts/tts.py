@@ -750,7 +750,7 @@ class ElevenLabsTTS:
         >>> result = await tts.generate("Hello world!", "output.mp3")
     """
 
-    DEFAULT_MODEL = "eleven_monolingual_v1"
+    DEFAULT_MODEL = "eleven_multilingual_v2"
 
     def __init__(
         self,
@@ -764,7 +764,7 @@ class ElevenLabsTTS:
         Args:
             api_key: Your ElevenLabs API key
             voice_id: Voice ID from your ElevenLabs account
-            model: Model ID (default: eleven_monolingual_v1)
+            model: Model ID (default: eleven_multilingual_v2)
         """
         self.api_key = api_key
         self.voice_id = voice_id
@@ -824,6 +824,132 @@ class ElevenLabsTTS:
             duration=duration,
             voice=self.voice_id,
             backend="elevenlabs"
+        )
+
+    async def generate_with_timings(
+        self,
+        text: str,
+        output_path: Path | str,
+        rate: str = "+0%",
+        stability: float = 0.5,
+        similarity_boost: float = 0.75,
+        max_retries: int = 3,
+        retry_delay: float = 2.0,
+        **_ignored,
+    ) -> TTSResultWithTimings:
+        """
+        Generate speech with sentence and word timings (same result type as
+        EdgeTTS.generate_with_timings, so callers can swap backends).
+
+        Uses the /with-timestamps endpoint, which returns per-character times;
+        words and sentences are built from them.
+
+        Args:
+            text: Text to convert
+            output_path: Where to save audio (mp3)
+            rate: Edge-style speed ("+10%"), mapped to ElevenLabs speed (0.7-1.2)
+            stability: Voice stability (0-1)
+            similarity_boost: Voice clarity (0-1)
+            max_retries: Attempts on network/5xx/429 errors
+            retry_delay: Base delay between attempts in seconds
+        """
+        import asyncio
+        import base64
+        import re
+        import httpx
+
+        if not text or not text.strip():
+            raise ValueError("Cannot generate TTS for empty text")
+
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        m = re.fullmatch(r"\s*([+-]?\d+(?:\.\d+)?)\s*%\s*", rate or "")
+        speed = min(1.2, max(0.7, 1 + float(m.group(1)) / 100)) if m else 1.0
+
+        url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}/with-timestamps"
+        payload = {
+            "text": text,
+            "model_id": self.model,
+            "voice_settings": {
+                "stability": stability,
+                "similarity_boost": similarity_boost,
+                "speed": speed,
+            },
+        }
+
+        data = None
+        last_error = None
+        async with httpx.AsyncClient(timeout=180) as client:
+            for attempt in range(max_retries):
+                try:
+                    response = await client.post(
+                        url,
+                        params={"output_format": "mp3_44100_128"},
+                        headers={"xi-api-key": self.api_key, "Content-Type": "application/json"},
+                        json=payload,
+                    )
+                    if response.status_code < 500 and response.status_code != 429:
+                        response.raise_for_status()
+                        data = response.json()
+                        break
+                    last_error = httpx.HTTPStatusError(
+                        f"ElevenLabs {response.status_code}: {response.text[:200]}",
+                        request=response.request, response=response)
+                except (httpx.TransportError, httpx.TimeoutException) as e:
+                    last_error = e
+                logger.warning(f"[ElevenLabs] attempt {attempt + 1}/{max_retries} failed: {last_error}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay * (attempt + 1))
+        if data is None:
+            raise last_error
+
+        output_path.write_bytes(base64.b64decode(data["audio_base64"]))
+
+        align = data.get("alignment") or data.get("normalized_alignment") or {}
+        chars = align.get("characters", [])
+        starts = align.get("character_start_times_seconds", [])
+        ends = align.get("character_end_times_seconds", [])
+
+        words: list[WordTiming] = []
+        cur, cs, ce = "", None, None
+        for ch, st, en in zip(chars, starts, ends):
+            if ch.isspace():
+                if cur:
+                    words.append(WordTiming(text=cur, start=cs, end=ce))
+                cur, cs = "", None
+                continue
+            if cs is None:
+                cs = st
+            cur += ch
+            ce = en
+        if cur:
+            words.append(WordTiming(text=cur, start=cs, end=ce))
+
+        sentences: list[SentenceTiming] = []
+        group: list[WordTiming] = []
+        for w in words:
+            group.append(w)
+            if re.search(r"[.!?][\"')\]]*$", w.text):
+                sentences.append(SentenceTiming(
+                    text=" ".join(x.text for x in group), start=group[0].start, end=group[-1].end))
+                group = []
+        if group:
+            sentences.append(SentenceTiming(
+                text=" ".join(x.text for x in group), start=group[0].start, end=group[-1].end))
+
+        duration = get_audio_duration(output_path)
+        if duration <= 0:
+            duration = words[-1].end if words else estimate_duration(text)
+
+        logger.info(f"[ElevenLabs] {duration:.1f}s, {len(sentences)} sentences, {len(words)} words, speed={speed}")
+        return TTSResultWithTimings(
+            audio_path=output_path,
+            duration=duration,
+            voice=self.voice_id,
+            backend="elevenlabs",
+            sentences=sentences,
+            words=words,
         )
 
     def __repr__(self) -> str:

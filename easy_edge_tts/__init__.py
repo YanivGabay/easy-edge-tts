@@ -28,7 +28,7 @@ from .rotator import VoiceRotator, get_voice_rotator
 from .voices import EDGE_VOICES, VOICE_MOODS
 from .utils import get_audio_duration
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 __all__ = [
     "EdgeTTS",
     "ElevenLabsTTS",
