@@ -16,6 +16,18 @@ from .utils import get_audio_duration, estimate_duration
 logger = logging.getLogger(__name__)
 
 
+
+def _communicate(text, voice, rate="+0%", pitch="+0Hz"):
+    """edge_tts.Communicate asking for word boundaries: edge-tts 7 reports sentence
+    boundaries unless told otherwise, which left generate_with_timings with no word
+    timings. Older edge-tts versions don't take the argument."""
+    import edge_tts
+    try:
+        return edge_tts.Communicate(text, voice, rate=rate, pitch=pitch, boundary="WordBoundary")
+    except TypeError:
+        return edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
+
+
 @dataclass
 class WordTiming:
     """Timing information for a word boundary from TTS."""
@@ -316,6 +328,8 @@ class EdgeTTS:
 
         try:
             import edge_tts
+
+
             from edge_tts.exceptions import NoAudioReceived
         except ImportError:
             raise ImportError(
@@ -428,7 +442,7 @@ class EdgeTTS:
 
         for attempt in range(max_retries):
             try:
-                communicate = edge_tts.Communicate(text, self.voice, rate=rate, pitch=pitch)
+                communicate = _communicate(text, self.voice, rate=rate, pitch=pitch)
 
                 timestamps = []
                 with open(output_path, "wb") as f:
@@ -535,7 +549,7 @@ class EdgeTTS:
 
         for attempt in range(max_retries):
             try:
-                communicate = edge_tts.Communicate(text, self.voice, rate=rate, pitch=pitch)
+                communicate = _communicate(text, self.voice, rate=rate, pitch=pitch)
 
                 sentences: list[SentenceTiming] = []
                 with open(output_path, "wb") as f:
@@ -655,7 +669,7 @@ class EdgeTTS:
             try:
                 logger.info(f"[EdgeTTS] Attempt {attempt + 1}/{max_retries}...")
 
-                communicate = edge_tts.Communicate(text, self.voice, rate=rate, pitch=pitch)
+                communicate = _communicate(text, self.voice, rate=rate, pitch=pitch)
 
                 sentences: list[SentenceTiming] = []
                 words: list[WordTiming] = []
